@@ -4,15 +4,7 @@ Contains the workflow logic for generating prompts using OpenAI Agent Builder SD
 Also includes AI-powered transcript extraction for structured data
 """
 
-try:
-    from agents import FileSearchTool, Agent, ModelSettings, TResponseInputItem, Runner, RunConfig, trace
-    AGENT_BUILDER_AVAILABLE = True
-except ImportError as e:
-    raise ImportError(
-        "Agent Builder SDK is required for workflow.py. "
-        "Please install the correct 'agents' package. "
-        f"Error: {e}"
-    )
+from agents import FileSearchTool, Agent, ModelSettings, TResponseInputItem, Runner, RunConfig, trace
 
 import os
 import json

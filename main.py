@@ -153,9 +153,24 @@ Generate a system prompt that begins with "You are..." and follows all best prac
         print(f"[LOG] Workflow input prepared with all required variables")
         
         # Use workflow function to generate prompt
-        workflow_result = await run_workflow(workflow_input)
-        
-        generated_prompt = workflow_result["output_text"].strip()
+        try:
+            workflow_result = await run_workflow(workflow_input)
+            if not workflow_result or "output_text" not in workflow_result:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Workflow returned unexpected result format: {workflow_result}"
+                )
+            generated_prompt = workflow_result["output_text"].strip()
+        except HTTPException:
+            raise
+        except Exception as workflow_error:
+            print(f"[ERROR] Workflow execution error: {str(workflow_error)}")
+            import traceback
+            print(f"[ERROR] Workflow traceback: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error executing workflow: {str(workflow_error)}"
+            )
         print(f"[LOG] Prompt generated successfully via Agent Builder workflow (length: {len(generated_prompt)} characters)")
         
         return {
@@ -163,6 +178,9 @@ Generate a system prompt that begins with "You are..." and follows all best prac
             "agent_info": agent_info.model_dump()
         }
     
+    except HTTPException:
+        # Re-raise HTTPException as-is (FastAPI will handle it properly)
+        raise
     except Exception as e:
         print(f"[ERROR] Error generating prompt: {str(e)}")
         import traceback
