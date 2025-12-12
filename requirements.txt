@@ -6,4 +6,3 @@ retell-sdk
 pydantic==2.5.0
 python-multipart==0.0.6
 requests==2.31.0
-

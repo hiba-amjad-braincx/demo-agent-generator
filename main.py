@@ -1,16 +1,36 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-import os
 from dotenv import load_dotenv
-import openai
-from retell import Retell
-import json
+from typing import Optional
+import os
+
+# Import models
+from models import AgentInfo
+
+# Import workflow functions (includes transcript extraction)
+try:
+    from workflow import (
+        run_workflow,
+        WorkflowInput,
+        extract_structured_data_from_transcript,
+        ExtractedStructuredData
+    )
+    WORKFLOW_AVAILABLE = True
+    TRANSCRIPT_EXTRACTOR_AVAILABLE = True
+    print("[LOG] Workflow functions imported successfully")
+except ImportError as e:
+    print(f"[ERROR] Workflow functions not available: {e}")
+    WORKFLOW_AVAILABLE = False
+    TRANSCRIPT_EXTRACTOR_AVAILABLE = False
+    run_workflow = None
+    WorkflowInput = None
+    extract_structured_data_from_transcript = None
+    ExtractedStructuredData = None
 
 # Load .env from current directory (root folder)
 load_dotenv()
+RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 
 app = FastAPI(title="Demo Agent Generation App")
 
@@ -23,76 +43,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize clients
-RETELL_API_KEY = os.getenv("RETELL_API_KEY")
-if Retell:
-    retell_client = Retell(api_key=RETELL_API_KEY)
-else:
-    retell_client = None
-    import requests
-
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Prompt library
-PROMPT_LIBRARY = {
-    "customer_service": {
-        "system_prompt": "You are a helpful and professional customer service representative. Your goal is to assist customers with their inquiries, resolve issues, and provide excellent service."
-    },
-    "sales": {
-        "system_prompt": "You are a knowledgeable and friendly sales representative. Your goal is to understand customer needs, present relevant solutions, and guide them through the purchase process."
-    },
-    "appointment_scheduling": {
-        "system_prompt": "You are a professional appointment scheduler. Your goal is to help customers book appointments efficiently, confirm details, and provide reminders."
-    },
-    "technical_support": {
-        "system_prompt": "You are a technical support specialist. Your goal is to diagnose technical issues, provide step-by-step solutions, and ensure customer problems are resolved."
-    },
-    "general": {
-        "system_prompt": "You are a helpful AI assistant. Your goal is to provide accurate information and assist users with their requests."
-    }
-}
-
-
-class AgentInfo(BaseModel):
-    name: str
-    persona: str
-    purpose: str
-    use_case: str
-    company_name: str
-    prompt_template: Optional[str] = None
-    voice_id: Optional[str] = "11labs-Cimo"
-    language: Optional[str] = "en-US"
-    llm_id: Optional[str] = None  # Use existing LLM if provided
-
-
-class WebhookData(BaseModel):
-    agent_name: Optional[str] = None
-    persona: Optional[str] = None
-    purpose: Optional[str] = None
-    use_case: Optional[str] = None
-    company_name: Optional[str] = None
-    
-    class Config:
-        extra = "allow"  # Allow extra fields
-
-
-class PostCallAnalysisField(BaseModel):
-    type: str
-    name: str
-    description: str
-    examples: Optional[List[str]] = None
-
 
 @app.get("/")
 async def root():
     return {"message": "Demo Agent Generation API", "status": "running"}
-
-
-@app.get("/prompts")
-async def get_prompt_library():
-    """Get available prompt templates"""
-    return {"prompts": PROMPT_LIBRARY}
-
 
 @app.get("/list-retell-llms")
 async def list_retell_llms():
@@ -114,75 +68,135 @@ async def list_retell_llms():
 
 
 @app.post("/generate-prompt")
-async def generate_prompt(agent_info: AgentInfo):
-    """Generate a custom prompt using OpenAI based on agent info"""
-    try:
-        # Determine which template to use based on use_case
-        template_key = agent_info.use_case.lower().replace(" ", "_")
-        if template_key not in PROMPT_LIBRARY:
-            template_key = "general"
-        
-        base_prompt = PROMPT_LIBRARY[template_key]["system_prompt"]
-        
-        # Enhance prompt with OpenAI
-        enhancement_prompt = f"""
-        Based on the following agent information, create a detailed and personalized system prompt in the format "You are [description]":
-        
-        Agent Name: {agent_info.name}
-        Persona: {agent_info.persona}
-        Purpose: {agent_info.purpose}
-        Use Case: {agent_info.use_case}
-        Company: {agent_info.company_name}
-        
-        Base Template: {base_prompt}
-        
-        Create a comprehensive system prompt that:
-        1. Starts with "You are" (not "I am" or "Hello, I am")
-        2. Describes the agent in third person
-        3. Incorporates the agent's personality, purpose, and company context
-        4. Is specific, engaging, and aligned with the use case
-        
-        Return only the prompt text, no additional formatting. The prompt should be a system instruction, not an introduction.
-        """
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a prompt engineering expert. Create system prompts for AI voice agents. The prompt MUST start with 'You are' and describe the agent in third person. Do NOT create first-person introductions or greetings. The prompt should be a system instruction, not a conversation starter."},
-                {"role": "user", "content": enhancement_prompt}
-            ],
-            temperature=0,
-            max_tokens=500
+async def generate_prompt(agent_info: AgentInfo, structured_data: Optional[ExtractedStructuredData] = None):
+    """Generate a custom prompt using OpenAI Agent Builder SDK workflow (required)"""
+    # Check if workflow is available
+    if not WORKFLOW_AVAILABLE or not run_workflow:
+        error_msg = "Workflow functions are required but not available. Please ensure workflow.py is accessible."
+        print(f"[ERROR] {error_msg}")
+        print(f"[ERROR] WORKFLOW_AVAILABLE: {WORKFLOW_AVAILABLE}, run_workflow: {run_workflow}")
+        raise HTTPException(
+            status_code=503,
+            detail=error_msg
         )
+    
+    try:
+        print(f"[LOG] Using Agent Builder SDK workflow for prompt generation")
+        print(f"[LOG] Workflow available: {WORKFLOW_AVAILABLE}")
+        print(f"[LOG] Agent details - Name: {agent_info.name}, Company: {agent_info.company_name}, Purpose: {agent_info.purpose}")
         
-        generated_prompt = response.choices[0].message.content.strip()
+        # Construct input_as_text from individual fields
+        website_info = f"\nWebsite URL: {agent_info.website_url}" if agent_info.website_url else ""
+        
+        # Build structured data section if available
+        structured_lines = []
+        if structured_data and structured_data.category:
+            cat_name = {
+                "A": "Task Handling",
+                "B": "Lead / Information Collection",
+                "C": "Information & Support",
+                "Z": "Other / Custom"
+            }.get(structured_data.category, "Unknown")
+            structured_lines.append(f"AGENT CATEGORY: {structured_data.category} — {cat_name}")
+
+            if structured_data.category == "A" and structured_data.task_type:
+                structured_lines.append(f"Task Type: {structured_data.task_type}")
+                if structured_data.required_fields:
+                    structured_lines.append(f"Required Fields: {', '.join(structured_data.required_fields)}")
+                if structured_data.availability_handling:
+                    structured_lines.append(f"Availability Handling: {structured_data.availability_handling}")
+                if structured_data.human_escalation is not None:
+                    structured_lines.append(f"Offer Human Transfer: {'Yes' if structured_data.human_escalation else 'No'}")
+
+            elif structured_data.category == "B":
+                if structured_data.collection_goal:
+                    structured_lines.append(f"Collection Goal: {structured_data.collection_goal}")
+                if structured_data.required_fields:
+                    structured_lines.append(f"Required Fields: {', '.join(structured_data.required_fields)}")
+
+            elif structured_data.category == "C":
+                if structured_data.information_type:
+                    structured_lines.append(f"Information Type: {structured_data.information_type}")
+                if structured_data.user_information:
+                    structured_lines.append(f"Collect User Info: {structured_data.user_information}")
+
+            elif structured_data.category == "Z" and structured_data.interaction_type:
+                structured_lines.append(f"Interaction Style: {structured_data.interaction_type}")
+
+        structured_data_section = "\n".join(structured_lines) if structured_lines else ""
+        if structured_data_section:
+            structured_data_section = "\n\n=== STRUCTURED AGENT CONFIGURATION ===\n" + structured_data_section
+            print(f"[LOG] Including structured data - Category: {structured_data.category}")
+        
+        # Format other_instructions as a list if provided
+        other_instructions_text = ""
+        if agent_info.other_instructions:
+            if isinstance(agent_info.other_instructions, list):
+                # Format as bulleted list
+                other_instructions_text = "\nother_instructions:\n" + "\n".join([f"- {rule}" for rule in agent_info.other_instructions])
+            else:
+                # Fallback for string (backward compatibility)
+                other_instructions_text = f"\nother_instructions: {agent_info.other_instructions}"
+        
+        input_as_text = f"""Generate a production-quality system prompt for a Voice AI agent with the following details:
+
+agent_name: {agent_info.name}
+persona: {agent_info.persona}
+purpose: {agent_info.purpose}
+company_name: {agent_info.company_name}{other_instructions_text}{website_info}{structured_data_section}
+
+Generate a system prompt that begins with "You are..." and follows all best practices from the knowledge base."""
+        
+        workflow_input = WorkflowInput(input_as_text=input_as_text)
+        
+        print(f"[LOG] Starting Agent Builder workflow execution...")
+        print(f"[LOG] Workflow input prepared with all required variables")
+        
+        # Use workflow function to generate prompt
+        workflow_result = await run_workflow(workflow_input)
+        
+        generated_prompt = workflow_result["output_text"].strip()
+        print(f"[LOG] Prompt generated successfully via Agent Builder workflow (length: {len(generated_prompt)} characters)")
         
         return {
             "generated_prompt": generated_prompt,
-            "base_template": template_key,
             "agent_info": agent_info.model_dump()
         }
     
     except Exception as e:
+        print(f"[ERROR] Error generating prompt: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error generating prompt: {str(e)}")
 
 
 @app.post("/create-agent")
-async def create_agent(agent_info: AgentInfo):
-    """Create a Retell agent with the provided information"""
+async def create_agent(agent_info: AgentInfo, structured_data: Optional[ExtractedStructuredData] = None):
+    """Create a Retell agent with the provided information
+    
+    Args:
+        agent_info: Agent configuration
+        structured_data: Optional structured data from transcript extraction (not used when called via HTTP endpoint)
+    """
     try:
         import requests
         
         # Use existing LLM ID if provided, otherwise create new LLM
         if agent_info.llm_id:
             llm_id = agent_info.llm_id
+            # Validate llm_id
+            if not isinstance(llm_id, str):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Invalid llm_id: {llm_id}"
+                )
         else:
             # Generate or use provided prompt
             if agent_info.prompt_template:
                 system_prompt = agent_info.prompt_template
             else:
-                # Generate prompt
-                prompt_response = await generate_prompt(agent_info)
+                # Generate prompt with structured data
+                prompt_response = await generate_prompt(agent_info, structured_data)
                 system_prompt = prompt_response["generated_prompt"]
             
             # Create new Retell LLM using direct API call
@@ -287,8 +301,11 @@ async def create_agent(agent_info: AgentInfo):
             "message": f"Agent '{agent_info.name}' created successfully!"
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating agent: {str(e)}")
+
 
 
 @app.post("/webhook")
@@ -343,31 +360,78 @@ async def receive_webhook(request: Request):
             if analysis:
                 print(f"[DEBUG] analysis keys: {list(analysis.keys())}")
         
-        # Map the extracted fields to our AgentInfo structure
-        # Fields from Demo Genie agent: agent_name, agent_persona, agent_usecase, company_name, other_instructions
+        # Get basic extracted fields from infra (other_instructions is now extracted from transcript)
         agent_name = extracted_data.get("agent_name") or ""
         agent_persona = extracted_data.get("agent_persona") or ""
-        agent_usecase = extracted_data.get("agent_usecase") or ""
+        agent_purpose = extracted_data.get("agent_purpose") or ""
         company_name = extracted_data.get("company_name") or ""
-        other_instructions = extracted_data.get("other_instructions") or ""
+        website_url = extracted_data.get("website_url") or ""
+        voice_gender = extracted_data.get("voice_gender") or ""
         
-        # Map use_case to our template keys
-        use_case_key = map_use_case_to_key(agent_usecase)
+        # Map voice_gender to Retell voice_id
+        voice_id = "11labs-Cimo"  # Default to feminine
+        if voice_gender:
+            voice_gender_lower = voice_gender.lower().strip()
+            if "masculine" in voice_gender_lower:
+                voice_id = "11labs-Anthony"
+            elif "feminine" in voice_gender_lower:
+                voice_id = "11labs-Cimo"
+            print(f"[LOG] Voice gender extracted: {voice_gender} → voice_id: {voice_id}")
+        else:
+            print(f"[LOG] No voice_gender found, using default: {voice_id}")
+        
+        # Extract structured data from transcript using AI
+        structured_data = None
+        if TRANSCRIPT_EXTRACTOR_AVAILABLE and extract_structured_data_from_transcript:
+            try:
+                # Get transcript from webhook (could be in transcript, call_transcript, or analysis.transcript)
+                transcript = (
+                    body_data.get("transcript") or
+                    body_data.get("call_transcript") or
+                    analysis.get("transcript") or
+                    body_data.get("call_transcript_processed") or
+                    ""
+                )
+                
+                if transcript:
+                    print(f"[LOG] Extracting structured data from transcript (length: {len(transcript)} chars)")
+                    basic_fields = {
+                        "agent_name": agent_name,
+                        "agent_persona": agent_persona,
+                        "agent_purpose": agent_purpose,
+                        "company_name": company_name,
+                        "website_url": website_url
+                        # other_instructions is now extracted from transcript, not from infra
+                    }
+                    structured_data = await extract_structured_data_from_transcript(transcript, basic_fields)
+                    print(f"[LOG] Structured data extracted - Category: {structured_data.category}")
+                    if structured_data.other_instructions:
+                        print(f"[LOG] Other instructions extracted from transcript ({len(structured_data.other_instructions)} rules):")
+                        for idx, rule in enumerate(structured_data.other_instructions, 1):
+                            print(f"[LOG]   {idx}. {rule}")
+                else:
+                    print(f"[WARNING] No transcript found in webhook data")
+            except Exception as e:
+                print(f"[ERROR] Error extracting structured data from transcript: {str(e)}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        
+        # Map to AgentInfo structure
+        # Use other_instructions from extracted structured_data, fallback to empty list
+        other_instructions = (structured_data.other_instructions if structured_data and structured_data.other_instructions else []) or []
         
         agent_data = {
             "name": agent_name,
             "persona": agent_persona,
-            "purpose": agent_usecase,  # Use the full use case text as purpose
-            "use_case": use_case_key,  # Use mapped key for template selection
-            "company_name": company_name
+            "purpose": agent_purpose,
+            "other_instructions": other_instructions,
+            "company_name": company_name,
+            "website_url": website_url if website_url else None,
+            "voice_id": voice_id
         }
         
-        # Handle other_instructions - can be added to persona
-        if other_instructions:
-            if agent_data["persona"]:
-                agent_data["persona"] += f". {other_instructions}"
-            else:
-                agent_data["persona"] = other_instructions
+        # Store structured_data for later use in workflow
+        agent_data["_structured_data"] = structured_data
         
         # Validate required fields
         if not agent_data["name"]:
@@ -376,15 +440,11 @@ async def receive_webhook(request: Request):
                 content={"error": "Missing required field: agent_name not found in extracted data"}
             )
         
-        if not agent_data["purpose"] and not agent_data["use_case"]:
+        if not agent_data["purpose"]:
             return JSONResponse(
                 status_code=400,
-                content={"error": "Missing required field: agent_usecase or purpose not found in extracted data"}
+                content={"error": "Missing required field: agent_purpose not found in extracted data"}
             )
-        
-        # If purpose is missing but use_case exists, use use_case as purpose
-        if not agent_data["purpose"]:
-            agent_data["purpose"] = agent_data["use_case"]
         
         # Set defaults for missing optional fields
         if not agent_data["persona"]:
@@ -392,11 +452,11 @@ async def receive_webhook(request: Request):
         if not agent_data["company_name"]:
             agent_data["company_name"] = "Demo Company"
         
-        # Create agent info object
+        # Create agent info object (remove _structured_data as it's not part of AgentInfo)
+        structured_data = agent_data.pop("_structured_data", None)
         agent_info = AgentInfo(**agent_data)
         
-        # Create the agent
-        result = await create_agent(agent_info)
+        result = await create_agent(agent_info, structured_data)
         
         return JSONResponse(
             status_code=200,
@@ -417,24 +477,6 @@ async def receive_webhook(request: Request):
             }
         )
 
-
-def map_use_case_to_key(use_case_text: str) -> str:
-    """Map use case text to our template keys"""
-    if not use_case_text:
-        return "general"
-    
-    use_case_lower = use_case_text.lower()
-    
-    if "customer service" in use_case_lower or "customer support" in use_case_lower:
-        return "customer_service"
-    elif "sales" in use_case_lower or "selling" in use_case_lower:
-        return "sales"
-    elif "appointment" in use_case_lower or "scheduling" in use_case_lower or "booking" in use_case_lower:
-        return "appointment_scheduling"
-    elif "technical support" in use_case_lower or "tech support" in use_case_lower or "support" in use_case_lower:
-        return "technical_support"
-    else:
-        return "general"
 
 if __name__ == "__main__":
     import uvicorn
