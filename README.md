@@ -42,6 +42,9 @@ pip install -r requirements.txt
 ```
 RETELL_API_KEY=your_retell_api_key_here
 OPENAI_API_KEY=your_openai_api_key_here
+AGENT_API_KEY=sk_live_<your-api-key>  # Bearer token for agent creation API
+AGENT_API_BASE_URL=https://api.braincxai.com  # Optional, defaults to this
+N8N_WEBHOOK_URL=https://your-n8n-instance.com/webhook/your-webhook-id  # n8n webhook URL for sending user contact info + agent URL
 ```
 
 ### Running the Application
@@ -85,14 +88,18 @@ Receive `call_analyzed` webhook events from Retell (via n8n) and create new agen
   "extracted_data": {
     "agent_name": "Sarah",
     "agent_persona": "Friendly and professional",
-    "agent_usecase": "Customer support",
+    "agent_purpose": "Customer support",
     "company_name": "Acme Corp",
-    "other_instructions": "Always greet warmly"
+    "voice_gender": "feminine",
+    "user_first_name": "Joe",
+    "user_last_name": "Morgan",
+    "user_email": "joe.morgan@gmail.com",
+    "user_phone": "+1 555-123-4567"
   }
 }
 ```
 
-The endpoint extracts agent information from the `extracted_data` field and creates a new Retell agent.
+The endpoint extracts agent information and user contact info from the `extracted_data` field, creates a new agent, and sends user contact info + agent URL to n8n for GHL contact creation.
 
 ## Use Cases
 

@@ -1,9 +1,11 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.24.0
 python-dotenv==1.0.0
 openai>=2.9.0
 retell-sdk
-pydantic==2.5.0
-python-multipart==0.0.6
+pydantic>=2.12.3
+python-multipart>=0.0.6
 requests==2.31.0
-
+openai-agents
+selenium>=4.15.0
+webdriver-manager>=4.0.0

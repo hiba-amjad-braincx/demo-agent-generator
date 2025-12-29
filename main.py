@@ -1,16 +1,40 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-import os
 from dotenv import load_dotenv
-import openai
-from retell import Retell
+from typing import Optional
+import os
 import json
+
+# Import models
+from models import AgentInfo
+
+# Import workflow functions (includes transcript extraction)
+try:
+    from workflow import (
+        run_workflow,
+        WorkflowInput,
+        extract_structured_data_from_transcript,
+        ExtractedStructuredData
+    )
+    WORKFLOW_AVAILABLE = True
+    TRANSCRIPT_EXTRACTOR_AVAILABLE = True
+    print("[LOG] Workflow functions imported successfully")
+except ImportError as e:
+    print(f"[ERROR] Workflow functions not available: {e}")
+    WORKFLOW_AVAILABLE = False
+    TRANSCRIPT_EXTRACTOR_AVAILABLE = False
+    run_workflow = None
+    WorkflowInput = None
+    extract_structured_data_from_transcript = None
+    ExtractedStructuredData = None
 
 # Load .env from current directory (root folder)
 load_dotenv()
+RETELL_API_KEY = os.getenv("RETELL_API_KEY")
+AGENT_API_KEY = os.getenv("AGENT_API_KEY")  # Bearer token for agent creation API (format: sk_live_<your-api-key>)
+AGENT_API_BASE_URL = os.getenv("AGENT_API_BASE_URL", "https://api.braincxai.com")  # Configurable base URL for API
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")  # n8n webhook URL for sending user contact info + agent URL
 
 app = FastAPI(title="Demo Agent Generation App")
 
@@ -23,241 +47,370 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize clients
-RETELL_API_KEY = os.getenv("RETELL_API_KEY")
-if Retell:
-    retell_client = Retell(api_key=RETELL_API_KEY)
-else:
-    retell_client = None
-    import requests
-
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Prompt library
-PROMPT_LIBRARY = {
-    "customer_service": {
-        "system_prompt": "You are a helpful and professional customer service representative. Your goal is to assist customers with their inquiries, resolve issues, and provide excellent service."
-    },
-    "sales": {
-        "system_prompt": "You are a knowledgeable and friendly sales representative. Your goal is to understand customer needs, present relevant solutions, and guide them through the purchase process."
-    },
-    "appointment_scheduling": {
-        "system_prompt": "You are a professional appointment scheduler. Your goal is to help customers book appointments efficiently, confirm details, and provide reminders."
-    },
-    "technical_support": {
-        "system_prompt": "You are a technical support specialist. Your goal is to diagnose technical issues, provide step-by-step solutions, and ensure customer problems are resolved."
-    },
-    "general": {
-        "system_prompt": "You are a helpful AI assistant. Your goal is to provide accurate information and assist users with their requests."
-    }
-}
-
-
-class AgentInfo(BaseModel):
-    name: str
-    persona: str
-    purpose: str
-    use_case: str
-    company_name: str
-    prompt_template: Optional[str] = None
-    voice_id: Optional[str] = "11labs-Cimo"
-    language: Optional[str] = "en-US"
-    llm_id: Optional[str] = None  # Use existing LLM if provided
-
-
-class WebhookData(BaseModel):
-    agent_name: Optional[str] = None
-    persona: Optional[str] = None
-    purpose: Optional[str] = None
-    use_case: Optional[str] = None
-    company_name: Optional[str] = None
-    
-    class Config:
-        extra = "allow"  # Allow extra fields
-
-
-class PostCallAnalysisField(BaseModel):
-    type: str
-    name: str
-    description: str
-    examples: Optional[List[str]] = None
-
 
 @app.get("/")
 async def root():
     return {"message": "Demo Agent Generation API", "status": "running"}
 
 
-@app.get("/prompts")
-async def get_prompt_library():
-    """Get available prompt templates"""
-    return {"prompts": PROMPT_LIBRARY}
+def get_bearer_token() -> str:
+    """Get Bearer token from environment variable.
+    
+    Returns:
+        str: Bearer token for authentication (format: sk_live_<your-api-key>)
+    """
+    if not AGENT_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "AGENT_API_KEY environment variable is required. "
+                "Set AGENT_API_KEY=sk_live_<your-api-key> in your .env file."
+            )
+        )
+    return AGENT_API_KEY
 
 
-@app.get("/list-retell-llms")
-async def list_retell_llms():
-    """List all available Retell LLMs"""
+async def send_to_n8n(user_first_name: Optional[str], user_last_name: Optional[str], user_email: Optional[str], user_phone: Optional[str], agent_url: Optional[str]):
+    """Send user contact info and agent URL to n8n webhook
+    
+    Args:
+        user_first_name: First name of the user
+        user_last_name: Last name of the user
+        user_email: Email address of the user
+        user_phone: Phone number of the user
+        agent_url: URL of the created agent
+    """
+    if not N8N_WEBHOOK_URL:
+        print(f"[WARNING] N8N_WEBHOOK_URL not configured, skipping n8n webhook call")
+        return
+    
+    if not agent_url:
+        print(f"[WARNING] No agent_url provided, skipping n8n webhook call")
+        return
+    
     try:
         import requests
-        base_url = "https://api.retellai.com"
-        headers = {
-            "Authorization": f"Bearer {RETELL_API_KEY}",
-            "Content-Type": "application/json"
+        
+        payload = {
+            "user_first_name": user_first_name,
+            "user_last_name": user_last_name,
+            "user_email": user_email,
+            "user_phone": user_phone,
+            "agent_url": agent_url
         }
         
-        response = requests.get(f"{base_url}/list-retell-llms", headers=headers)
-        response.raise_for_status()
-        return {"llms": response.json()}
-    
+        print(f"[LOG] Sending data to n8n webhook: {N8N_WEBHOOK_URL}")
+        print(f"[LOG] Payload: {json.dumps(payload, indent=2)}")
+        
+        response = requests.post(
+            N8N_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.ok:
+            print(f"[LOG] Successfully sent data to n8n webhook")
+        else:
+            print(f"[WARNING] n8n webhook returned status {response.status_code}: {response.text}")
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching Retell LLMs: {str(e)}")
+        # Don't fail agent creation if n8n webhook fails
+        print(f"[ERROR] Error sending data to n8n webhook: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
 
 
 @app.post("/generate-prompt")
-async def generate_prompt(agent_info: AgentInfo):
-    """Generate a custom prompt using OpenAI based on agent info"""
-    try:
-        # Determine which template to use based on use_case
-        template_key = agent_info.use_case.lower().replace(" ", "_")
-        if template_key not in PROMPT_LIBRARY:
-            template_key = "general"
-        
-        base_prompt = PROMPT_LIBRARY[template_key]["system_prompt"]
-        
-        # Enhance prompt with OpenAI
-        enhancement_prompt = f"""
-        Based on the following agent information, create a detailed and personalized system prompt in the format "You are [description]":
-        
-        Agent Name: {agent_info.name}
-        Persona: {agent_info.persona}
-        Purpose: {agent_info.purpose}
-        Use Case: {agent_info.use_case}
-        Company: {agent_info.company_name}
-        
-        Base Template: {base_prompt}
-        
-        Create a comprehensive system prompt that:
-        1. Starts with "You are" (not "I am" or "Hello, I am")
-        2. Describes the agent in third person
-        3. Incorporates the agent's personality, purpose, and company context
-        4. Is specific, engaging, and aligned with the use case
-        
-        Return only the prompt text, no additional formatting. The prompt should be a system instruction, not an introduction.
-        """
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a prompt engineering expert. Create system prompts for AI voice agents. The prompt MUST start with 'You are' and describe the agent in third person. Do NOT create first-person introductions or greetings. The prompt should be a system instruction, not a conversation starter."},
-                {"role": "user", "content": enhancement_prompt}
-            ],
-            temperature=0,
-            max_tokens=500
+async def generate_prompt(agent_info: AgentInfo, structured_data: Optional[ExtractedStructuredData] = None):
+    """Generate a custom prompt using OpenAI Agent Builder SDK workflow (required)"""
+    # Check if workflow is available
+    if not WORKFLOW_AVAILABLE or not run_workflow:
+        error_msg = "Workflow functions are required but not available. Please ensure workflow.py is accessible."
+        print(f"[ERROR] {error_msg}")
+        print(f"[ERROR] WORKFLOW_AVAILABLE: {WORKFLOW_AVAILABLE}, run_workflow: {run_workflow}")
+        raise HTTPException(
+            status_code=503,
+            detail=error_msg
         )
+    
+    try:
+        print(f"[LOG] Using Agent Builder SDK workflow for prompt generation")
+        print(f"[LOG] Workflow available: {WORKFLOW_AVAILABLE}")
+        print(f"[LOG] Agent details - Name: {agent_info.name}, Company: {agent_info.company_name}, Purpose: {agent_info.purpose}")
         
-        generated_prompt = response.choices[0].message.content.strip()
+        # Construct input_as_text from individual fields
+        # website_info = f"\nWebsite URL: {agent_info.website_url}" if agent_info.website_url else ""
+        
+        # Build structured data section if available
+        structured_lines = []
+        if structured_data and structured_data.category:
+            cat_name = {
+                "A": "Task Handling",
+                "B": "Lead / Information Collection",
+                "C": "Information & Support",
+                "Z": "Other / Custom"
+            }.get(structured_data.category, "Unknown")
+            structured_lines.append(f"AGENT CATEGORY: {structured_data.category} — {cat_name}")
+
+            if structured_data.category == "A" and structured_data.task_type:
+                structured_lines.append(f"Task Type: {structured_data.task_type}")
+                if structured_data.required_fields:
+                    structured_lines.append(f"Required Fields: {', '.join(structured_data.required_fields)}")
+                if structured_data.availability_handling:
+                    structured_lines.append(f"Availability Handling: {structured_data.availability_handling}")
+                if structured_data.human_escalation is not None:
+                    structured_lines.append(f"Offer Human Transfer: {'Yes' if structured_data.human_escalation else 'No'}")
+
+            elif structured_data.category == "B":
+                if structured_data.collection_goal:
+                    structured_lines.append(f"Collection Goal: {structured_data.collection_goal}")
+                if structured_data.required_fields:
+                    structured_lines.append(f"Required Fields: {', '.join(structured_data.required_fields)}")
+
+            elif structured_data.category == "C":
+                if structured_data.information_type:
+                    structured_lines.append(f"Information Type: {structured_data.information_type}")
+                if structured_data.user_information:
+                    structured_lines.append(f"Collect User Info: {structured_data.user_information}")
+
+            elif structured_data.category == "Z" and structured_data.interaction_type:
+                structured_lines.append(f"Interaction Style: {structured_data.interaction_type}")
+
+        structured_data_section = "\n".join(structured_lines) if structured_lines else ""
+        if structured_data_section:
+            structured_data_section = "\n\n=== STRUCTURED AGENT CONFIGURATION ===\n" + structured_data_section
+            print(f"[LOG] Including structured data - Category: {structured_data.category}")
+        
+        # Format other_instructions as a list if provided
+        other_instructions_text = ""
+        if agent_info.other_instructions:
+            if isinstance(agent_info.other_instructions, list):
+                # Format as bulleted list
+                other_instructions_text = "\nother_instructions:\n" + "\n".join([f"- {rule}" for rule in agent_info.other_instructions])
+            else:
+                # Fallback for string (backward compatibility)
+                other_instructions_text = f"\nother_instructions: {agent_info.other_instructions}"
+        
+        input_as_text = f"""Generate a production-quality system prompt for a Voice AI agent with the following details:
+
+agent_name: {agent_info.name}
+persona: {agent_info.persona}
+purpose: {agent_info.purpose}
+company_name: {agent_info.company_name}{other_instructions_text}{structured_data_section}
+
+Generate a system prompt that begins with "You are..." and follows all best practices from the knowledge base."""
+        
+        workflow_input = WorkflowInput(input_as_text=input_as_text)
+        
+        print(f"[LOG] Starting Agent Builder workflow execution...")
+        print(f"[LOG] Workflow input prepared with all required variables")
+        
+        # Use workflow function to generate prompt
+        import time
+        workflow_start_time = time.time()
+        try:
+            workflow_result = await run_workflow(workflow_input)
+            workflow_elapsed = time.time() - workflow_start_time
+            print(f"[LOG] Total workflow execution time: {workflow_elapsed:.2f} seconds ({workflow_elapsed/60:.2f} minutes)")
+            if not workflow_result or "output_text" not in workflow_result:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Workflow returned unexpected result format: {workflow_result}"
+                )
+            generated_prompt = workflow_result["output_text"].strip()
+        except HTTPException:
+            raise
+        except Exception as workflow_error:
+            print(f"[ERROR] Workflow execution error: {str(workflow_error)}")
+            import traceback
+            print(f"[ERROR] Workflow traceback: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error executing workflow: {str(workflow_error)}"
+            )
+        print(f"[LOG] Prompt generated successfully via Agent Builder workflow (length: {len(generated_prompt)} characters)")
         
         return {
             "generated_prompt": generated_prompt,
-            "base_template": template_key,
             "agent_info": agent_info.model_dump()
         }
     
+    except HTTPException:
+        # Re-raise HTTPException as-is (FastAPI will handle it properly)
+        raise
     except Exception as e:
+        print(f"[ERROR] Error generating prompt: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error generating prompt: {str(e)}")
 
 
+# async def determine_begin_message(
+#     agent_info: AgentInfo, 
+#     structured_data: Optional[ExtractedStructuredData], 
+#     system_prompt: str
+# ) -> Optional[str]:
+#     """Determine the begin_message for Retell LLM based on greeting detection and category.
+    
+#     Args:
+#         agent_info: Agent configuration
+#         structured_data: Optional structured data containing category
+#         system_prompt: The generated system prompt
+        
+#     Returns:
+#         begin_message string if default should be used, None if greeting is provided in instructions
+#     """
+#     import re
+    
+#     # More specific greeting patterns that won't match false positives
+#     greeting_patterns = [
+#         r'\bgreet\b',  # "greet" as a word
+#         r'\bhello\b',  # "hello" as a word
+#         r'\bhi\b',  # "hi" as a word
+#         r'good morning',
+#         r'good afternoon',
+#         r'good evening',
+#         r'\bwelcome\b',
+#         r'opening message',
+#         r'begin with\b',  # "begin with" followed by word boundary
+#         r'start with\b',  # "start with" followed by word boundary
+#         r'first say\b',
+#         r'say hello\b',
+#         r'introduce yourself',
+#     ]
+    
+#     def check_for_greeting(text):
+#         """Check if text contains actual greeting instructions, not just mentions of 'beginning'"""
+#         text_lower = text.lower()
+#         for pattern in greeting_patterns:
+#             if re.search(pattern, text_lower):
+#                 # Additional check: if it's "begin with" or "start with", ensure it's not "beginning of" or "starting"
+#                 if pattern in [r'begin with\b', r'start with\b']:
+#                     # Don't match if it's part of "at the beginning of" or "starting the"
+#                     if re.search(r'\bat the beginning of\b', text_lower) or re.search(r'\bstarting the\b', text_lower):
+#                         continue
+#                 return True
+#         return False
+    
+#     # Check other_instructions from agent_info for greetings
+#     if agent_info.other_instructions:
+#         all_instructions_text = " ".join(agent_info.other_instructions)
+#         if check_for_greeting(all_instructions_text):
+#             print(f"[LOG] Greeting detected in agent_info.other_instructions, skipping default begin_message")
+#             return None
+    
+#     # Check other_instructions from structured_data for greetings
+#     if structured_data and structured_data.other_instructions:
+#         all_instructions_text = " ".join(structured_data.other_instructions)
+#         if check_for_greeting(all_instructions_text):
+#             print(f"[LOG] Greeting detected in structured_data.other_instructions, skipping default begin_message")
+#             return None
+    
+#     # Check system prompt for greeting instructions
+#     prompt_lower = system_prompt.lower()
+#     greeting_phrases = ["greet the user", "say hello", "begin with hello", "start by greeting", 
+#                        "opening greeting", "initial greeting", "greet them", "greet callers"]
+#     exclusion_phrases = ["exclude greetings", "no greetings", "do not greet", "never greet"]
+    
+#     has_exclusion = any(phrase in prompt_lower for phrase in exclusion_phrases)
+#     has_positive_greeting = any(phrase in prompt_lower for phrase in greeting_phrases)
+    
+#     if has_positive_greeting and not has_exclusion:
+#         print(f"[LOG] Greeting detected in system prompt, skipping default begin_message")
+#         return None
+    
+#     # No greeting found, generate category-specific default message
+#     category = None
+#     if structured_data and structured_data.category:
+#         category = structured_data.category
+    
+#     # Category-specific default begin_messages
+#     if category == "B":
+#         # Category B: Lead / Information Collection - focus on collecting information
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. I'd like to ask you a few quick questions."
+#         print(f"[LOG] No greeting found in instructions, using Category B default begin_message (information collection)")
+#         return default_message
+#     elif category == "C":
+#         # Category C: Information & Support - can use help message
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
+#         print(f"[LOG] No greeting found in instructions, using Category C default begin_message (information & support)")
+#         return default_message
+#     elif category == "A":
+#         # Category A: Task Handling - can use help message
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
+#         print(f"[LOG] No greeting found in instructions, using Category A default begin_message (task handling)")
+#         return default_message
+#     else:
+#         # Category Z or unknown - use generic help message
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
+#         print(f"[LOG] No greeting found in instructions, using generic default begin_message (category: {category or 'unknown'})")
+#         return default_message
+
+
 @app.post("/create-agent")
-async def create_agent(agent_info: AgentInfo):
-    """Create a Retell agent with the provided information"""
+async def create_agent(
+    agent_info: AgentInfo, 
+    structured_data: Optional[ExtractedStructuredData] = None,
+    user_first_name: Optional[str] = None,
+    user_last_name: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_phone: Optional[str] = None
+):
+    """Create an agent with the provided information using the new agent creation API
+    
+    Args:
+        agent_info: Agent configuration
+        structured_data: Optional structured data from transcript extraction (not used when called via HTTP endpoint)
+        user_first_name: Optional first name of the user who will receive the demo agent
+        user_last_name: Optional last name of the user who will receive the demo agent
+        user_email: Optional email address of the user who will receive the demo agent
+        user_phone: Optional phone number of the user who will receive the demo agent
+    """
     try:
         import requests
         
-        # Use existing LLM ID if provided, otherwise create new LLM
-        if agent_info.llm_id:
-            llm_id = agent_info.llm_id
+        # Generate or use provided prompt
+        if agent_info.prompt_template:
+            system_prompt = agent_info.prompt_template
         else:
-            # Generate or use provided prompt
-            if agent_info.prompt_template:
-                system_prompt = agent_info.prompt_template
-            else:
-                # Generate prompt
-                prompt_response = await generate_prompt(agent_info)
-                system_prompt = prompt_response["generated_prompt"]
-            
-            # Create new Retell LLM using direct API call
-            base_url = "https://api.retellai.com"
-            headers = {
-                "Authorization": f"Bearer {RETELL_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            llm_payload = {
-                "general_prompt": system_prompt,
-                "general_tools_enabled": True,
-                "begin_message": f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?",
-                "model": "gpt-4o-mini",
-                "temperature": 0
-            }
-            
-            print(f"[LOG] Creating Retell LLM for agent: {agent_info.name}")
-            llm_response = requests.post(f"{base_url}/create-retell-llm", json=llm_payload, headers=headers)
-            
-            if not llm_response.ok:
-                error_detail = llm_response.text
-                try:
-                    error_json = llm_response.json()
-                    error_detail = error_json.get("message") or error_json.get("error") or str(error_json)
-                except:
-                    pass
-                raise HTTPException(
-                    status_code=llm_response.status_code,
-                    detail=f"Error creating Retell LLM: {error_detail}"
-                )
-            
-            llm_data = llm_response.json()
-            llm_id = llm_data.get("retell_llm_id") or llm_data.get("llm_id")
-            
-            if llm_response.ok and llm_id:
-                print(f"[LOG] LLM created successfully: {llm_id}")
-            else:
-                print(f"[LOG] LLM creation failed: Status {llm_response.status_code}")
-            
-            if not llm_id:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"LLM created but no llm_id returned. Response: {llm_data}"
-                )
+            # Generate prompt with structured data
+            prompt_response = await generate_prompt(agent_info, structured_data)
+            system_prompt = prompt_response["generated_prompt"]
         
-        # Validate llm_id
-        if not llm_id or not isinstance(llm_id, str):
-            raise HTTPException(
-                status_code=500,
-                detail=f"Invalid llm_id: {llm_id}"
-            )
+        # Get Bearer token for authentication
+        bearer_token = get_bearer_token()
         
-        # Create Retell Agent using direct API call
-        base_url = "https://api.retellai.com"
-        headers = {
-            "Authorization": f"Bearer {RETELL_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # Build agent creation payload for new API
         agent_payload = {
-            "response_engine": {
-                "type": "retell-llm",
-                "llm_id": llm_id
-            },
-            "voice_id": agent_info.voice_id,
-            "agent_name": agent_info.name,
-            "language": agent_info.language
+            "name": agent_info.name,
+            "system_prompt": system_prompt,
+            "llm_model": "gpt-4o-mini",
+            "temperature": 0,
+            "locale": agent_info.language or "en-US",
+            "voice_provider": "elevenlabs",
+            "elevenlabs_voice_id": agent_info.voice_id or "S24RmY8KqPr0G02ppwJF",  # Default to female voice
+            "elevenlabs_model": "eleven_monolingual_v1",
+            "is_active": True,
+            "pii_policy": "off",
+            "stt_provider": "deepgram",
+            "stt_model": "nova3_mono_en",
+            "stt_language": agent_info.language or "en-US"
         }
         
-        print(f"[LOG] Creating Retell agent: {agent_info.name}")
-        print(f"[LOG] Using LLM ID: {llm_id}")
-        print(f"[LOG] Agent payload: name={agent_info.name}, voice={agent_info.voice_id}, language={agent_info.language}")
+        # Create agent using new API with Bearer token authentication
+        agent_api_url = f"{AGENT_API_BASE_URL}/agents"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {bearer_token}"
+        }
         
-        agent_response = requests.post(f"{base_url}/create-agent", json=agent_payload, headers=headers)
+        print(f"[LOG] Creating agent via new API: {agent_info.name}")
+        print(f"[LOG] API URL: {agent_api_url}")
+        print(f"[LOG] Agent payload: name={agent_info.name}, voice={agent_payload['elevenlabs_voice_id']}")
         
-        # Better error handling to see what Retell API returns
+        agent_response = requests.post(agent_api_url, json=agent_payload, headers=headers)
+        
         if not agent_response.ok:
             error_detail = agent_response.text
             try:
@@ -268,28 +421,36 @@ async def create_agent(agent_info: AgentInfo):
             print(f"[LOG] Agent creation failed: Status {agent_response.status_code}, Error: {error_detail}")
             raise HTTPException(
                 status_code=agent_response.status_code,
-                detail=f"Retell API error: {error_detail}"
+                detail=f"Agent API error: {error_detail}"
             )
         
         agent_data = agent_response.json()
-        agent_id = agent_data.get("agent_id")
-        agent_name = agent_data.get("agent_name")
-        voice_id = agent_data.get("voice_id")
+        agent_id = agent_data.get("id")
+        agent_name = agent_data.get("name")
+        agent_url = agent_data.get("agent_url")
+        embed_code = agent_data.get("embed_code")
         
         print(f"[LOG] Agent created successfully: {agent_id} ({agent_name})")
+        if agent_url:
+            print(f"[LOG] Agent URL: {agent_url}")
+        
+        # Send user contact info + agent URL to n8n webhook (non-blocking)
+        if user_first_name or user_last_name or user_email or user_phone:
+            await send_to_n8n(user_first_name, user_last_name, user_email, user_phone, agent_url)
         
         return {
             "success": True,
             "agent_id": agent_id,
             "agent_name": agent_name,
-            "llm_id": llm_id,
-            "voice_id": voice_id,
+            "agent_url": agent_url,
+            "embed_code": embed_code,
             "message": f"Agent '{agent_info.name}' created successfully!"
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating agent: {str(e)}")
-
 
 @app.post("/webhook")
 async def receive_webhook(request: Request):
@@ -343,31 +504,91 @@ async def receive_webhook(request: Request):
             if analysis:
                 print(f"[DEBUG] analysis keys: {list(analysis.keys())}")
         
-        # Map the extracted fields to our AgentInfo structure
-        # Fields from Demo Genie agent: agent_name, agent_persona, agent_usecase, company_name, other_instructions
+        # Get basic extracted fields from infra (other_instructions is now extracted from transcript)
         agent_name = extracted_data.get("agent_name") or ""
         agent_persona = extracted_data.get("agent_persona") or ""
-        agent_usecase = extracted_data.get("agent_usecase") or ""
+        agent_purpose = extracted_data.get("agent_purpose") or ""
         company_name = extracted_data.get("company_name") or ""
-        other_instructions = extracted_data.get("other_instructions") or ""
+        # website_url = extracted_data.get("website_url") or ""
+        voice_gender = extracted_data.get("voice_gender") or ""
         
-        # Map use_case to our template keys
-        use_case_key = map_use_case_to_key(agent_usecase)
+        # Extract user contact info (separate from agent info)
+        user_first_name = extracted_data.get("user_first_name") or None
+        user_last_name = extracted_data.get("user_last_name") or None
+        user_email = extracted_data.get("user_email") or None
+        user_phone = extracted_data.get("user_phone") or None
+        
+        if user_first_name or user_last_name or user_email or user_phone:
+            print(f"[LOG] User contact info extracted:")
+            print(f"[LOG]   - First Name: {user_first_name}")
+            print(f"[LOG]   - Last Name: {user_last_name}")
+            print(f"[LOG]   - Email: {user_email}")
+            print(f"[LOG]   - Phone: {user_phone}")
+        
+        # Map voice_gender to ElevenLabs voice_id
+        voice_id = "S24RmY8KqPr0G02ppwJF"  # Default to female voice
+        if voice_gender:
+            voice_gender_lower = voice_gender.lower().strip()
+            if "masculine" in voice_gender_lower or "male" in voice_gender_lower:
+                voice_id = "UgBBYS2sOqTuMpoF3BR0"  # Male voice
+            elif "feminine" in voice_gender_lower or "female" in voice_gender_lower:
+                voice_id = "S24RmY8KqPr0G02ppwJF"  # Female voice
+            print(f"[LOG] Voice gender extracted: {voice_gender} → voice_id: {voice_id}")
+        else:
+            print(f"[LOG] No voice_gender found, using default: {voice_id}")
+        
+        # Extract structured data from transcript using AI
+        structured_data = None
+        if TRANSCRIPT_EXTRACTOR_AVAILABLE and extract_structured_data_from_transcript:
+            try:
+                # Get transcript from webhook (could be in transcript, call_transcript, or analysis.transcript)
+                transcript = (
+                    body_data.get("transcript") or
+                    body_data.get("call_transcript") or
+                    analysis.get("transcript") or
+                    body_data.get("call_transcript_processed") or
+                    ""
+                )
+                
+                if transcript:
+                    print(f"[LOG] Extracting structured data from transcript (length: {len(transcript)} chars)")
+                    basic_fields = {
+                        "agent_name": agent_name,
+                        "agent_persona": agent_persona,
+                        "agent_purpose": agent_purpose,
+                        "company_name": company_name
+                        # "website_url": website_url
+                        # other_instructions is now extracted from transcript, not from infra
+                    }
+                    structured_data = await extract_structured_data_from_transcript(transcript, basic_fields)
+                    print(f"[LOG] Structured data extracted - Category: {structured_data.category}")
+                    if structured_data.other_instructions:
+                        print(f"[LOG] Other instructions extracted from transcript ({len(structured_data.other_instructions)} rules):")
+                        for idx, rule in enumerate(structured_data.other_instructions, 1):
+                            print(f"[LOG]   {idx}. {rule}")
+                else:
+                    print(f"[WARNING] No transcript found in webhook data")
+            except Exception as e:
+                print(f"[ERROR] Error extracting structured data from transcript: {str(e)}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        
+        # Map to AgentInfo structure
+        # Use other_instructions from extracted structured_data, fallback to empty list
+        other_instructions = (structured_data.other_instructions if structured_data and structured_data.other_instructions else []) or []
         
         agent_data = {
             "name": agent_name,
             "persona": agent_persona,
-            "purpose": agent_usecase,  # Use the full use case text as purpose
-            "use_case": use_case_key,  # Use mapped key for template selection
-            "company_name": company_name
+            "purpose": agent_purpose,
+            "other_instructions": other_instructions,
+            "company_name": company_name,
+            # "website_url": website_url if website_url else None,
+            "voice_id": voice_id
         }
         
-        # Handle other_instructions - can be added to persona
-        if other_instructions:
-            if agent_data["persona"]:
-                agent_data["persona"] += f". {other_instructions}"
-            else:
-                agent_data["persona"] = other_instructions
+        # Store structured_data for later use in workflow
+        agent_data["_structured_data"] = structured_data
         
         # Validate required fields
         if not agent_data["name"]:
@@ -376,15 +597,11 @@ async def receive_webhook(request: Request):
                 content={"error": "Missing required field: agent_name not found in extracted data"}
             )
         
-        if not agent_data["purpose"] and not agent_data["use_case"]:
+        if not agent_data["purpose"]:
             return JSONResponse(
                 status_code=400,
-                content={"error": "Missing required field: agent_usecase or purpose not found in extracted data"}
+                content={"error": "Missing required field: agent_purpose not found in extracted data"}
             )
-        
-        # If purpose is missing but use_case exists, use use_case as purpose
-        if not agent_data["purpose"]:
-            agent_data["purpose"] = agent_data["use_case"]
         
         # Set defaults for missing optional fields
         if not agent_data["persona"]:
@@ -392,11 +609,19 @@ async def receive_webhook(request: Request):
         if not agent_data["company_name"]:
             agent_data["company_name"] = "Demo Company"
         
-        # Create agent info object
+        # Create agent info object (remove _structured_data as it's not part of AgentInfo)
+        structured_data = agent_data.pop("_structured_data", None)
         agent_info = AgentInfo(**agent_data)
         
-        # Create the agent
-        result = await create_agent(agent_info)
+        # Create agent with user contact info (will be sent to n8n after agent creation)
+        result = await create_agent(
+            agent_info, 
+            structured_data,
+            user_first_name=user_first_name,
+            user_last_name=user_last_name,
+            user_email=user_email,
+            user_phone=user_phone
+        )
         
         return JSONResponse(
             status_code=200,
@@ -417,24 +642,6 @@ async def receive_webhook(request: Request):
             }
         )
 
-
-def map_use_case_to_key(use_case_text: str) -> str:
-    """Map use case text to our template keys"""
-    if not use_case_text:
-        return "general"
-    
-    use_case_lower = use_case_text.lower()
-    
-    if "customer service" in use_case_lower or "customer support" in use_case_lower:
-        return "customer_service"
-    elif "sales" in use_case_lower or "selling" in use_case_lower:
-        return "sales"
-    elif "appointment" in use_case_lower or "scheduling" in use_case_lower or "booking" in use_case_lower:
-        return "appointment_scheduling"
-    elif "technical support" in use_case_lower or "tech support" in use_case_lower or "support" in use_case_lower:
-        return "technical_support"
-    else:
-        return "general"
 
 if __name__ == "__main__":
     import uvicorn
