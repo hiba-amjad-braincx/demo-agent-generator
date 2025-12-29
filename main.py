@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from typing import Optional
 import os
+import json
 
 # Import models
 from models import AgentInfo
@@ -31,6 +32,9 @@ except ImportError as e:
 # Load .env from current directory (root folder)
 load_dotenv()
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
+AGENT_API_KEY = os.getenv("AGENT_API_KEY")  # Bearer token for agent creation API (format: sk_live_<your-api-key>)
+AGENT_API_BASE_URL = os.getenv("AGENT_API_BASE_URL", "https://api.braincxai.com")  # Configurable base URL for API
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")  # n8n webhook URL for sending user contact info + agent URL
 
 app = FastAPI(title="Demo Agent Generation App")
 
@@ -48,23 +52,73 @@ app.add_middleware(
 async def root():
     return {"message": "Demo Agent Generation API", "status": "running"}
 
-@app.get("/list-retell-llms")
-async def list_retell_llms():
-    """List all available Retell LLMs"""
+
+def get_bearer_token() -> str:
+    """Get Bearer token from environment variable.
+    
+    Returns:
+        str: Bearer token for authentication (format: sk_live_<your-api-key>)
+    """
+    if not AGENT_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "AGENT_API_KEY environment variable is required. "
+                "Set AGENT_API_KEY=sk_live_<your-api-key> in your .env file."
+            )
+        )
+    return AGENT_API_KEY
+
+
+async def send_to_n8n(user_first_name: Optional[str], user_last_name: Optional[str], user_email: Optional[str], user_phone: Optional[str], agent_url: Optional[str]):
+    """Send user contact info and agent URL to n8n webhook
+    
+    Args:
+        user_first_name: First name of the user
+        user_last_name: Last name of the user
+        user_email: Email address of the user
+        user_phone: Phone number of the user
+        agent_url: URL of the created agent
+    """
+    if not N8N_WEBHOOK_URL:
+        print(f"[WARNING] N8N_WEBHOOK_URL not configured, skipping n8n webhook call")
+        return
+    
+    if not agent_url:
+        print(f"[WARNING] No agent_url provided, skipping n8n webhook call")
+        return
+    
     try:
         import requests
-        base_url = "https://api.retellai.com"
-        headers = {
-            "Authorization": f"Bearer {RETELL_API_KEY}",
-            "Content-Type": "application/json"
+        
+        payload = {
+            "user_first_name": user_first_name,
+            "user_last_name": user_last_name,
+            "user_email": user_email,
+            "user_phone": user_phone,
+            "agent_url": agent_url
         }
         
-        response = requests.get(f"{base_url}/list-retell-llms", headers=headers)
-        response.raise_for_status()
-        return {"llms": response.json()}
-    
+        print(f"[LOG] Sending data to n8n webhook: {N8N_WEBHOOK_URL}")
+        print(f"[LOG] Payload: {json.dumps(payload, indent=2)}")
+        
+        response = requests.post(
+            N8N_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.ok:
+            print(f"[LOG] Successfully sent data to n8n webhook")
+        else:
+            print(f"[WARNING] n8n webhook returned status {response.status_code}: {response.text}")
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching Retell LLMs: {str(e)}")
+        # Don't fail agent creation if n8n webhook fails
+        print(f"[ERROR] Error sending data to n8n webhook: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
 
 
 @app.post("/generate-prompt")
@@ -86,7 +140,7 @@ async def generate_prompt(agent_info: AgentInfo, structured_data: Optional[Extra
         print(f"[LOG] Agent details - Name: {agent_info.name}, Company: {agent_info.company_name}, Purpose: {agent_info.purpose}")
         
         # Construct input_as_text from individual fields
-        website_info = f"\nWebsite URL: {agent_info.website_url}" if agent_info.website_url else ""
+        # website_info = f"\nWebsite URL: {agent_info.website_url}" if agent_info.website_url else ""
         
         # Build structured data section if available
         structured_lines = []
@@ -143,7 +197,7 @@ async def generate_prompt(agent_info: AgentInfo, structured_data: Optional[Extra
 agent_name: {agent_info.name}
 persona: {agent_info.persona}
 purpose: {agent_info.purpose}
-company_name: {agent_info.company_name}{other_instructions_text}{website_info}{structured_data_section}
+company_name: {agent_info.company_name}{other_instructions_text}{structured_data_section}
 
 Generate a system prompt that begins with "You are..." and follows all best practices from the knowledge base."""
         
@@ -153,8 +207,12 @@ Generate a system prompt that begins with "You are..." and follows all best prac
         print(f"[LOG] Workflow input prepared with all required variables")
         
         # Use workflow function to generate prompt
+        import time
+        workflow_start_time = time.time()
         try:
             workflow_result = await run_workflow(workflow_input)
+            workflow_elapsed = time.time() - workflow_start_time
+            print(f"[LOG] Total workflow execution time: {workflow_elapsed:.2f} seconds ({workflow_elapsed/60:.2f} minutes)")
             if not workflow_result or "output_text" not in workflow_result:
                 raise HTTPException(
                     status_code=500,
@@ -188,108 +246,171 @@ Generate a system prompt that begins with "You are..." and follows all best prac
         raise HTTPException(status_code=500, detail=f"Error generating prompt: {str(e)}")
 
 
+# async def determine_begin_message(
+#     agent_info: AgentInfo, 
+#     structured_data: Optional[ExtractedStructuredData], 
+#     system_prompt: str
+# ) -> Optional[str]:
+#     """Determine the begin_message for Retell LLM based on greeting detection and category.
+    
+#     Args:
+#         agent_info: Agent configuration
+#         structured_data: Optional structured data containing category
+#         system_prompt: The generated system prompt
+        
+#     Returns:
+#         begin_message string if default should be used, None if greeting is provided in instructions
+#     """
+#     import re
+    
+#     # More specific greeting patterns that won't match false positives
+#     greeting_patterns = [
+#         r'\bgreet\b',  # "greet" as a word
+#         r'\bhello\b',  # "hello" as a word
+#         r'\bhi\b',  # "hi" as a word
+#         r'good morning',
+#         r'good afternoon',
+#         r'good evening',
+#         r'\bwelcome\b',
+#         r'opening message',
+#         r'begin with\b',  # "begin with" followed by word boundary
+#         r'start with\b',  # "start with" followed by word boundary
+#         r'first say\b',
+#         r'say hello\b',
+#         r'introduce yourself',
+#     ]
+    
+#     def check_for_greeting(text):
+#         """Check if text contains actual greeting instructions, not just mentions of 'beginning'"""
+#         text_lower = text.lower()
+#         for pattern in greeting_patterns:
+#             if re.search(pattern, text_lower):
+#                 # Additional check: if it's "begin with" or "start with", ensure it's not "beginning of" or "starting"
+#                 if pattern in [r'begin with\b', r'start with\b']:
+#                     # Don't match if it's part of "at the beginning of" or "starting the"
+#                     if re.search(r'\bat the beginning of\b', text_lower) or re.search(r'\bstarting the\b', text_lower):
+#                         continue
+#                 return True
+#         return False
+    
+#     # Check other_instructions from agent_info for greetings
+#     if agent_info.other_instructions:
+#         all_instructions_text = " ".join(agent_info.other_instructions)
+#         if check_for_greeting(all_instructions_text):
+#             print(f"[LOG] Greeting detected in agent_info.other_instructions, skipping default begin_message")
+#             return None
+    
+#     # Check other_instructions from structured_data for greetings
+#     if structured_data and structured_data.other_instructions:
+#         all_instructions_text = " ".join(structured_data.other_instructions)
+#         if check_for_greeting(all_instructions_text):
+#             print(f"[LOG] Greeting detected in structured_data.other_instructions, skipping default begin_message")
+#             return None
+    
+#     # Check system prompt for greeting instructions
+#     prompt_lower = system_prompt.lower()
+#     greeting_phrases = ["greet the user", "say hello", "begin with hello", "start by greeting", 
+#                        "opening greeting", "initial greeting", "greet them", "greet callers"]
+#     exclusion_phrases = ["exclude greetings", "no greetings", "do not greet", "never greet"]
+    
+#     has_exclusion = any(phrase in prompt_lower for phrase in exclusion_phrases)
+#     has_positive_greeting = any(phrase in prompt_lower for phrase in greeting_phrases)
+    
+#     if has_positive_greeting and not has_exclusion:
+#         print(f"[LOG] Greeting detected in system prompt, skipping default begin_message")
+#         return None
+    
+#     # No greeting found, generate category-specific default message
+#     category = None
+#     if structured_data and structured_data.category:
+#         category = structured_data.category
+    
+#     # Category-specific default begin_messages
+#     if category == "B":
+#         # Category B: Lead / Information Collection - focus on collecting information
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. I'd like to ask you a few quick questions."
+#         print(f"[LOG] No greeting found in instructions, using Category B default begin_message (information collection)")
+#         return default_message
+#     elif category == "C":
+#         # Category C: Information & Support - can use help message
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
+#         print(f"[LOG] No greeting found in instructions, using Category C default begin_message (information & support)")
+#         return default_message
+#     elif category == "A":
+#         # Category A: Task Handling - can use help message
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
+#         print(f"[LOG] No greeting found in instructions, using Category A default begin_message (task handling)")
+#         return default_message
+#     else:
+#         # Category Z or unknown - use generic help message
+#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
+#         print(f"[LOG] No greeting found in instructions, using generic default begin_message (category: {category or 'unknown'})")
+#         return default_message
+
+
 @app.post("/create-agent")
-async def create_agent(agent_info: AgentInfo, structured_data: Optional[ExtractedStructuredData] = None):
-    """Create a Retell agent with the provided information
+async def create_agent(
+    agent_info: AgentInfo, 
+    structured_data: Optional[ExtractedStructuredData] = None,
+    user_first_name: Optional[str] = None,
+    user_last_name: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_phone: Optional[str] = None
+):
+    """Create an agent with the provided information using the new agent creation API
     
     Args:
         agent_info: Agent configuration
         structured_data: Optional structured data from transcript extraction (not used when called via HTTP endpoint)
+        user_first_name: Optional first name of the user who will receive the demo agent
+        user_last_name: Optional last name of the user who will receive the demo agent
+        user_email: Optional email address of the user who will receive the demo agent
+        user_phone: Optional phone number of the user who will receive the demo agent
     """
     try:
         import requests
         
-        # Use existing LLM ID if provided, otherwise create new LLM
-        if agent_info.llm_id:
-            llm_id = agent_info.llm_id
-            # Validate llm_id
-            if not isinstance(llm_id, str):
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Invalid llm_id: {llm_id}"
-                )
+        # Generate or use provided prompt
+        if agent_info.prompt_template:
+            system_prompt = agent_info.prompt_template
         else:
-            # Generate or use provided prompt
-            if agent_info.prompt_template:
-                system_prompt = agent_info.prompt_template
-            else:
-                # Generate prompt with structured data
-                prompt_response = await generate_prompt(agent_info, structured_data)
-                system_prompt = prompt_response["generated_prompt"]
-            
-            # Create new Retell LLM using direct API call
-            base_url = "https://api.retellai.com"
-            headers = {
-                "Authorization": f"Bearer {RETELL_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            llm_payload = {
-                "general_prompt": system_prompt,
-                "general_tools_enabled": True,
-                "begin_message": f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?",
-                "model": "gpt-4o-mini",
-                "temperature": 0
-            }
-            
-            print(f"[LOG] Creating Retell LLM for agent: {agent_info.name}")
-            llm_response = requests.post(f"{base_url}/create-retell-llm", json=llm_payload, headers=headers)
-            
-            if not llm_response.ok:
-                error_detail = llm_response.text
-                try:
-                    error_json = llm_response.json()
-                    error_detail = error_json.get("message") or error_json.get("error") or str(error_json)
-                except:
-                    pass
-                raise HTTPException(
-                    status_code=llm_response.status_code,
-                    detail=f"Error creating Retell LLM: {error_detail}"
-                )
-            
-            llm_data = llm_response.json()
-            llm_id = llm_data.get("retell_llm_id") or llm_data.get("llm_id")
-            
-            if llm_response.ok and llm_id:
-                print(f"[LOG] LLM created successfully: {llm_id}")
-            else:
-                print(f"[LOG] LLM creation failed: Status {llm_response.status_code}")
-            
-            if not llm_id:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"LLM created but no llm_id returned. Response: {llm_data}"
-                )
+            # Generate prompt with structured data
+            prompt_response = await generate_prompt(agent_info, structured_data)
+            system_prompt = prompt_response["generated_prompt"]
         
-        # Validate llm_id
-        if not llm_id or not isinstance(llm_id, str):
-            raise HTTPException(
-                status_code=500,
-                detail=f"Invalid llm_id: {llm_id}"
-            )
+        # Get Bearer token for authentication
+        bearer_token = get_bearer_token()
         
-        # Create Retell Agent using direct API call
-        base_url = "https://api.retellai.com"
-        headers = {
-            "Authorization": f"Bearer {RETELL_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # Build agent creation payload for new API
         agent_payload = {
-            "response_engine": {
-                "type": "retell-llm",
-                "llm_id": llm_id
-            },
-            "voice_id": agent_info.voice_id,
-            "agent_name": agent_info.name,
-            "language": agent_info.language
+            "name": agent_info.name,
+            "system_prompt": system_prompt,
+            "llm_model": "gpt-4o-mini",
+            "temperature": 0,
+            "locale": agent_info.language or "en-US",
+            "voice_provider": "elevenlabs",
+            "elevenlabs_voice_id": agent_info.voice_id or "S24RmY8KqPr0G02ppwJF",  # Default to female voice
+            "elevenlabs_model": "eleven_monolingual_v1",
+            "is_active": True,
+            "pii_policy": "off",
+            "stt_provider": "deepgram",
+            "stt_model": "nova3_mono_en",
+            "stt_language": agent_info.language or "en-US"
         }
         
-        print(f"[LOG] Creating Retell agent: {agent_info.name}")
-        print(f"[LOG] Using LLM ID: {llm_id}")
-        print(f"[LOG] Agent payload: name={agent_info.name}, voice={agent_info.voice_id}, language={agent_info.language}")
+        # Create agent using new API with Bearer token authentication
+        agent_api_url = f"{AGENT_API_BASE_URL}/agents"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {bearer_token}"
+        }
         
-        agent_response = requests.post(f"{base_url}/create-agent", json=agent_payload, headers=headers)
+        print(f"[LOG] Creating agent via new API: {agent_info.name}")
+        print(f"[LOG] API URL: {agent_api_url}")
+        print(f"[LOG] Agent payload: name={agent_info.name}, voice={agent_payload['elevenlabs_voice_id']}")
         
-        # Better error handling to see what Retell API returns
+        agent_response = requests.post(agent_api_url, json=agent_payload, headers=headers)
+        
         if not agent_response.ok:
             error_detail = agent_response.text
             try:
@@ -300,22 +421,29 @@ async def create_agent(agent_info: AgentInfo, structured_data: Optional[Extracte
             print(f"[LOG] Agent creation failed: Status {agent_response.status_code}, Error: {error_detail}")
             raise HTTPException(
                 status_code=agent_response.status_code,
-                detail=f"Retell API error: {error_detail}"
+                detail=f"Agent API error: {error_detail}"
             )
         
         agent_data = agent_response.json()
-        agent_id = agent_data.get("agent_id")
-        agent_name = agent_data.get("agent_name")
-        voice_id = agent_data.get("voice_id")
+        agent_id = agent_data.get("id")
+        agent_name = agent_data.get("name")
+        agent_url = agent_data.get("agent_url")
+        embed_code = agent_data.get("embed_code")
         
         print(f"[LOG] Agent created successfully: {agent_id} ({agent_name})")
+        if agent_url:
+            print(f"[LOG] Agent URL: {agent_url}")
+        
+        # Send user contact info + agent URL to n8n webhook (non-blocking)
+        if user_first_name or user_last_name or user_email or user_phone:
+            await send_to_n8n(user_first_name, user_last_name, user_email, user_phone, agent_url)
         
         return {
             "success": True,
             "agent_id": agent_id,
             "agent_name": agent_name,
-            "llm_id": llm_id,
-            "voice_id": voice_id,
+            "agent_url": agent_url,
+            "embed_code": embed_code,
             "message": f"Agent '{agent_info.name}' created successfully!"
         }
     
@@ -323,8 +451,6 @@ async def create_agent(agent_info: AgentInfo, structured_data: Optional[Extracte
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating agent: {str(e)}")
-
-
 
 @app.post("/webhook")
 async def receive_webhook(request: Request):
@@ -383,17 +509,30 @@ async def receive_webhook(request: Request):
         agent_persona = extracted_data.get("agent_persona") or ""
         agent_purpose = extracted_data.get("agent_purpose") or ""
         company_name = extracted_data.get("company_name") or ""
-        website_url = extracted_data.get("website_url") or ""
+        # website_url = extracted_data.get("website_url") or ""
         voice_gender = extracted_data.get("voice_gender") or ""
         
-        # Map voice_gender to Retell voice_id
-        voice_id = "11labs-Cimo"  # Default to feminine
+        # Extract user contact info (separate from agent info)
+        user_first_name = extracted_data.get("user_first_name") or None
+        user_last_name = extracted_data.get("user_last_name") or None
+        user_email = extracted_data.get("user_email") or None
+        user_phone = extracted_data.get("user_phone") or None
+        
+        if user_first_name or user_last_name or user_email or user_phone:
+            print(f"[LOG] User contact info extracted:")
+            print(f"[LOG]   - First Name: {user_first_name}")
+            print(f"[LOG]   - Last Name: {user_last_name}")
+            print(f"[LOG]   - Email: {user_email}")
+            print(f"[LOG]   - Phone: {user_phone}")
+        
+        # Map voice_gender to ElevenLabs voice_id
+        voice_id = "S24RmY8KqPr0G02ppwJF"  # Default to female voice
         if voice_gender:
             voice_gender_lower = voice_gender.lower().strip()
-            if "masculine" in voice_gender_lower:
-                voice_id = "11labs-Anthony"
-            elif "feminine" in voice_gender_lower:
-                voice_id = "11labs-Cimo"
+            if "masculine" in voice_gender_lower or "male" in voice_gender_lower:
+                voice_id = "UgBBYS2sOqTuMpoF3BR0"  # Male voice
+            elif "feminine" in voice_gender_lower or "female" in voice_gender_lower:
+                voice_id = "S24RmY8KqPr0G02ppwJF"  # Female voice
             print(f"[LOG] Voice gender extracted: {voice_gender} → voice_id: {voice_id}")
         else:
             print(f"[LOG] No voice_gender found, using default: {voice_id}")
@@ -417,8 +556,8 @@ async def receive_webhook(request: Request):
                         "agent_name": agent_name,
                         "agent_persona": agent_persona,
                         "agent_purpose": agent_purpose,
-                        "company_name": company_name,
-                        "website_url": website_url
+                        "company_name": company_name
+                        # "website_url": website_url
                         # other_instructions is now extracted from transcript, not from infra
                     }
                     structured_data = await extract_structured_data_from_transcript(transcript, basic_fields)
@@ -444,7 +583,7 @@ async def receive_webhook(request: Request):
             "purpose": agent_purpose,
             "other_instructions": other_instructions,
             "company_name": company_name,
-            "website_url": website_url if website_url else None,
+            # "website_url": website_url if website_url else None,
             "voice_id": voice_id
         }
         
@@ -474,7 +613,15 @@ async def receive_webhook(request: Request):
         structured_data = agent_data.pop("_structured_data", None)
         agent_info = AgentInfo(**agent_data)
         
-        result = await create_agent(agent_info, structured_data)
+        # Create agent with user contact info (will be sent to n8n after agent creation)
+        result = await create_agent(
+            agent_info, 
+            structured_data,
+            user_first_name=user_first_name,
+            user_last_name=user_last_name,
+            user_email=user_email,
+            user_phone=user_phone
+        )
         
         return JSONResponse(
             status_code=200,
