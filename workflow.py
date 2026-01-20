@@ -46,6 +46,31 @@ Never combine different rule types (e.g., name rules, confirmation rules, emerge
 Each domain-specific rule must stand alone for clarity.
 Use short, focused paragraphs or bullets containing only one concept.
 
+Conversation Opening Rule
+Before asking the first question, the agent must produce a brief, natural spoken introduction.
+
+The introduction must:
+Explain the purpose of the interaction using structured configuration data.
+Be dynamically generated based on the agent category and relevant fields.
+Contain no questions.
+Contain no data collection.
+Use natural, spoken-language phrasing aligned with the agent persona.
+
+The purpose explanation must be derived as follows:
+If Category = A (Task Handling), describe assistance using task_type.
+If Category = B (Lead / Information Collection), describe information collection using collection_goal and company_name.
+If Category = C (Information & Support), describe informational assistance using information_type.
+If Category = Z (Other / Unclear), describe assistance using interaction_type.
+
+The agent must not use fixed or hard-coded sentences. 
+The dynamic introduction follows immediately after the agent greeting.
+After delivering this introduction, the agent must wait for the user’s response before asking any questions or collecting any information.
+
+Human Phrasing Rule
+When asking questions or transitioning between steps, the system prompt must instruct the agent to use natural, spoken-language phrasing instead of form-style or survey-style wording.
+Questions must sound like conversational speech, using polite transitions and soft lead-ins, while preserving the exact intent of the question.
+Do not phrase questions as isolated prompts or checklist items.
+
 Flow Rendering Rule
 If other_instructions include a flow, sequence, or ordered process, the system prompt must render it as a step-by-step bulleted list in the exact order provided. 
 Each step must be a single bullet describing one action or question. 
@@ -68,17 +93,21 @@ General informational questions do not require name collection.
 2. Universal Number Rule 
 For all numbers — including phone numbers, postal codes, account numbers, confirmation codes, reference numbers, unit numbers, and the last four digits of credit cards: 
 The agent must capture and repeat all numbers digit-by-digit, never as whole numbers. 
+ Example: For \"4342859111\", say \"4-3-4-2-8-5-9-1-1-1\".
 The agent must never guess or alter digits. 
+The agent must not announce that it will repeat the numbers.
 If unsure, the agent must ask the user to repeat the number. 
 Emergency numbers must always be spelled out (“nine one one”). 
 Exceptions: 
 Monetary amounts may be written normally (e.g., $135). 
 Years may be spoken normally (e.g., 2024). 
-Date of birth
  
 3. Email Addresses 
-When a user spells an email, the agent must capture every character exactly as spoken. 
+When a user spells an email, the agent must capture and repeat every character exactly as spoken. 
+Example:  For \"markjason123@gmail.com\", say \"m-a-r-k-j-a-s-o-n one two three at gmail dot com\"
+Ask the user to spell out the email.
 Confirm email in standard email format (username@domain.com). 
+The agent must never pronounce or repeat the “@” symbol literally and must always say the word “at” and for \".\" symbol it shold say \"dot.\"
 Always repeat the email and end with: “Is that correct?” 
 Ask for clarification when letters and digits sound similar (i/1, o/0, e/3, a/8). 
  
@@ -142,6 +171,7 @@ Describe how the agent collects the specified fields
 Describe how the agent handles scheduling or availability if applicable 
 Describe how troubleshooting or order flow, or account/service actions
 Specify when and how the agent should escalate to a human 
+Must instruct that when performing an action or task, the agent may use brief, natural acknowledgment phrases (e.g., indicating processing or completion) to maintain conversational flow, without adding technical detail.
  
 CATEGORY B — Lead / Information Collection 
 If Category = “B”, integrate the following fields: 
@@ -152,6 +182,8 @@ The system prompt must:
 Define the purpose of collecting user information 
 Specify instructions for gathering each required field 
 Enforce sequencing or formatting constraints 
+Instruct that agent must never ask “How can I assist you today?” or any other open-ended conversational prompts.
+Specify that the agent must not answer questions outside the scope of the required information collection, except to explain why the information is being requested.
  
 CATEGORY C — Information & Support 
 If Category = “C”, integrate: 
@@ -417,4 +449,3 @@ Only include fields that are relevant to the detected category. Set irrelevant f
         print(f"[ERROR] Traceback: {traceback.format_exc()}")
         # Return empty structure on error
         return ExtractedStructuredData()
-

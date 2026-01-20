@@ -246,108 +246,6 @@ Generate a system prompt that begins with "You are..." and follows all best prac
         raise HTTPException(status_code=500, detail=f"Error generating prompt: {str(e)}")
 
 
-# async def determine_begin_message(
-#     agent_info: AgentInfo, 
-#     structured_data: Optional[ExtractedStructuredData], 
-#     system_prompt: str
-# ) -> Optional[str]:
-#     """Determine the begin_message for Retell LLM based on greeting detection and category.
-    
-#     Args:
-#         agent_info: Agent configuration
-#         structured_data: Optional structured data containing category
-#         system_prompt: The generated system prompt
-        
-#     Returns:
-#         begin_message string if default should be used, None if greeting is provided in instructions
-#     """
-#     import re
-    
-#     # More specific greeting patterns that won't match false positives
-#     greeting_patterns = [
-#         r'\bgreet\b',  # "greet" as a word
-#         r'\bhello\b',  # "hello" as a word
-#         r'\bhi\b',  # "hi" as a word
-#         r'good morning',
-#         r'good afternoon',
-#         r'good evening',
-#         r'\bwelcome\b',
-#         r'opening message',
-#         r'begin with\b',  # "begin with" followed by word boundary
-#         r'start with\b',  # "start with" followed by word boundary
-#         r'first say\b',
-#         r'say hello\b',
-#         r'introduce yourself',
-#     ]
-    
-#     def check_for_greeting(text):
-#         """Check if text contains actual greeting instructions, not just mentions of 'beginning'"""
-#         text_lower = text.lower()
-#         for pattern in greeting_patterns:
-#             if re.search(pattern, text_lower):
-#                 # Additional check: if it's "begin with" or "start with", ensure it's not "beginning of" or "starting"
-#                 if pattern in [r'begin with\b', r'start with\b']:
-#                     # Don't match if it's part of "at the beginning of" or "starting the"
-#                     if re.search(r'\bat the beginning of\b', text_lower) or re.search(r'\bstarting the\b', text_lower):
-#                         continue
-#                 return True
-#         return False
-    
-#     # Check other_instructions from agent_info for greetings
-#     if agent_info.other_instructions:
-#         all_instructions_text = " ".join(agent_info.other_instructions)
-#         if check_for_greeting(all_instructions_text):
-#             print(f"[LOG] Greeting detected in agent_info.other_instructions, skipping default begin_message")
-#             return None
-    
-#     # Check other_instructions from structured_data for greetings
-#     if structured_data and structured_data.other_instructions:
-#         all_instructions_text = " ".join(structured_data.other_instructions)
-#         if check_for_greeting(all_instructions_text):
-#             print(f"[LOG] Greeting detected in structured_data.other_instructions, skipping default begin_message")
-#             return None
-    
-#     # Check system prompt for greeting instructions
-#     prompt_lower = system_prompt.lower()
-#     greeting_phrases = ["greet the user", "say hello", "begin with hello", "start by greeting", 
-#                        "opening greeting", "initial greeting", "greet them", "greet callers"]
-#     exclusion_phrases = ["exclude greetings", "no greetings", "do not greet", "never greet"]
-    
-#     has_exclusion = any(phrase in prompt_lower for phrase in exclusion_phrases)
-#     has_positive_greeting = any(phrase in prompt_lower for phrase in greeting_phrases)
-    
-#     if has_positive_greeting and not has_exclusion:
-#         print(f"[LOG] Greeting detected in system prompt, skipping default begin_message")
-#         return None
-    
-#     # No greeting found, generate category-specific default message
-#     category = None
-#     if structured_data and structured_data.category:
-#         category = structured_data.category
-    
-#     # Category-specific default begin_messages
-#     if category == "B":
-#         # Category B: Lead / Information Collection - focus on collecting information
-#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. I'd like to ask you a few quick questions."
-#         print(f"[LOG] No greeting found in instructions, using Category B default begin_message (information collection)")
-#         return default_message
-#     elif category == "C":
-#         # Category C: Information & Support - can use help message
-#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
-#         print(f"[LOG] No greeting found in instructions, using Category C default begin_message (information & support)")
-#         return default_message
-#     elif category == "A":
-#         # Category A: Task Handling - can use help message
-#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
-#         print(f"[LOG] No greeting found in instructions, using Category A default begin_message (task handling)")
-#         return default_message
-#     else:
-#         # Category Z or unknown - use generic help message
-#         default_message = f"Hello! I'm {agent_info.name} from {agent_info.company_name}. How can I help you today?"
-#         print(f"[LOG] No greeting found in instructions, using generic default begin_message (category: {category or 'unknown'})")
-#         return default_message
-
-
 @app.post("/create-agent")
 async def create_agent(
     agent_info: AgentInfo, 
@@ -389,7 +287,7 @@ async def create_agent(
             "temperature": 0,
             "locale": agent_info.language or "en-US",
             "voice_provider": "elevenlabs",
-            "elevenlabs_voice_id": agent_info.voice_id or "S24RmY8KqPr0G02ppwJF",  # Default to female voice
+            "elevenlabs_voice_id": agent_info.voice_id or "esunmKO3sPWJNo7W1w0t",  # Default to female voice
             "elevenlabs_model": "eleven_monolingual_v1",
             "is_active": True,
             "pii_policy": "off",
@@ -526,13 +424,13 @@ async def receive_webhook(request: Request):
             print(f"[LOG]   - Phone: {user_phone}")
         
         # Map voice_gender to ElevenLabs voice_id
-        voice_id = "S24RmY8KqPr0G02ppwJF"  # Default to female voice
+        voice_id = "esunmKO3sPWJNo7W1w0t"  # Default to female voice
         if voice_gender:
             voice_gender_lower = voice_gender.lower().strip()
             if "masculine" in voice_gender_lower or "male" in voice_gender_lower:
                 voice_id = "UgBBYS2sOqTuMpoF3BR0"  # Male voice
             elif "feminine" in voice_gender_lower or "female" in voice_gender_lower:
-                voice_id = "S24RmY8KqPr0G02ppwJF"  # Female voice
+                voice_id = "esunmKO3sPWJNo7W1w0t"  # Female voice
             print(f"[LOG] Voice gender extracted: {voice_gender} → voice_id: {voice_id}")
         else:
             print(f"[LOG] No voice_gender found, using default: {voice_id}")
