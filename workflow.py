@@ -55,6 +55,7 @@ Be dynamically generated based on the agent category and relevant fields.
 Contain no questions.
 Contain no data collection.
 Use natural, spoken-language phrasing aligned with the agent persona.
+For Category B or Information Collection agents, the introduction must not include asking "How can I assist you today?" or other conversational statements since the agent is solely for information collection purposes.
 
 The purpose explanation must be derived as follows:
 If Category = A (Task Handling), describe assistance using task_type.
