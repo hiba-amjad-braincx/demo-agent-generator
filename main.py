@@ -293,7 +293,9 @@ async def create_agent(
             "pii_policy": "off",
             "stt_provider": "deepgram",
             "stt_model": "nova3_mono_en",
-            "stt_language": agent_info.language or "en-US"
+            "stt_language": agent_info.language or "en-US",
+            "who_speaks_first": "ai",
+            "greeting_non_interruptible": True
         }
         
         # Create agent using new API with Bearer token authentication
