@@ -426,12 +426,13 @@ async def receive_webhook(request: Request):
             print(f"[LOG]   - Phone: {user_phone}")
         
         # Map voice_gender to ElevenLabs voice_id
+        # Handles both formats: "female"/"male" (current) and "feminine"/"masculine" (legacy)
         voice_id = "esunmKO3sPWJNo7W1w0t"  # Default to female voice
         if voice_gender:
             voice_gender_lower = voice_gender.lower().strip()
-            if "masculine" in voice_gender_lower or "male" in voice_gender_lower:
+            if "male" in voice_gender_lower or "masculine" in voice_gender_lower:
                 voice_id = "UgBBYS2sOqTuMpoF3BR0"  # Male voice
-            elif "feminine" in voice_gender_lower or "female" in voice_gender_lower:
+            elif "female" in voice_gender_lower or "feminine" in voice_gender_lower:
                 voice_id = "esunmKO3sPWJNo7W1w0t"  # Female voice
             print(f"[LOG] Voice gender extracted: {voice_gender} → voice_id: {voice_id}")
         else:
