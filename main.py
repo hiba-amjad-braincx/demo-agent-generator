@@ -283,7 +283,7 @@ async def create_agent(
         agent_payload = {
             "name": agent_info.name,
             "system_prompt": system_prompt,
-            "llm_model": "gpt-4o-mini",
+            "llm_model": "gpt-4o",
             "temperature": 0,
             "locale": agent_info.language or "en-US",
             "voice_provider": "elevenlabs",
