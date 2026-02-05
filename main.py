@@ -288,7 +288,7 @@ async def create_agent(
             "locale": agent_info.language or "en-US",
             "voice_provider": "elevenlabs",
             "elevenlabs_voice_id": agent_info.voice_id or "esunmKO3sPWJNo7W1w0t",  # Default to female voice
-            "elevenlabs_model": "eleven_monolingual_v1",
+            "elevenlabs_model": "eleven_turbo_v2_5",
             "is_active": True,
             "pii_policy": "off",
             "stt_provider": "deepgram",
