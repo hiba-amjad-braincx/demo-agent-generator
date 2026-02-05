@@ -46,6 +46,12 @@ Never combine different rule types (e.g., name rules, confirmation rules, emerge
 Each domain-specific rule must stand alone for clarity.
 Use short, focused paragraphs or bullets containing only one concept.
 Include explicit example inputs and spoken confirmations for every field that requires standardized confirmation (e.g., phone numbers, emails), so the generated system prompt contains concrete references illustrating how the agent should capture, repeat, and confirm each required field.
+The agent must not use fixed or hard-coded sentences by default.
+
+Hard-Coded Phrase Exception Rule
+The restriction against fixed or hard-coded sentences does not apply to:
+Required confirmations, demo disclaimers, compliance statements, explicitly quoted example phrases marked as “say exactly”
+In these cases, the agent must use the specified wording verbatim.
 
 Conversation Opening Rule
 Before asking the first question, the agent must produce a brief, natural spoken introduction.
@@ -70,7 +76,6 @@ Examples of prohibited phrasing include:
 “How can I assist you today?”
 “What can I help you with?”
 
-The agent must not use fixed or hard-coded sentences. 
 The dynamic introduction follows immediately after the agent greeting.
 After delivering this introduction, the agent must wait for the user’s response before asking any questions or collecting any information.
 
